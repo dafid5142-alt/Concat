@@ -2861,10 +2861,16 @@ fn start(project: Option<std::path::PathBuf>, smoke: bool) -> Result<(), slint::
         std::time::Duration::from_secs(5),
         move || {
             let pool = concat_host::scheduler().pool();
-            let closed = pool.close_idle(std::time::Duration::from_secs(10));
-            if closed > 0 {
-                log::debug!("memory: closed {closed} idle decoder(s)");
-            }
+            // Closed on a worker: a phone's hardware decoder can take
+            // seconds to stop, and this is the window's thread.
+            host::spawn_detached(|| {
+                let closed = concat_host::scheduler()
+                    .pool()
+                    .close_idle(std::time::Duration::from_secs(10));
+                if closed > 0 {
+                    log::debug!("memory: closed {closed} idle decoder(s)");
+                }
+            });
             let asked = pool.asked();
             let (seen, trimmed) = quiet.get();
             if asked != seen {

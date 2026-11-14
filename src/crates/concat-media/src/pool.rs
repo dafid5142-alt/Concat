@@ -792,16 +792,43 @@ impl ReaderPool {
     /// playhead left long ago is memory spent on nothing. A reader closed
     /// here is opened again on the next frame wanted from it, at the cost
     /// of one seek. Returns how many went.
+    ///
+    /// The readers are closed once the pool's lock is let go, on the
+    /// calling thread: a phone's hardware decoder can take seconds to stop,
+    /// and closed under the lock it held up every other thread that wanted
+    /// a frame. So this is not for the window's own thread - on a phone it
+    /// stopped answering there, and Android offered to close it.
     pub fn close_idle(&self, idle: std::time::Duration) -> usize {
-        let Ok(mut readers) = self.readers.lock() else {
-            return 0;
+        let closing: Vec<Warm> = {
+            let Ok(mut readers) = self.readers.lock() else {
+                return 0;
+            };
+            let now = std::time::Instant::now();
+            let (kept, closing): (Vec<Warm>, Vec<Warm>) = std::mem::take(&mut readers.warm)
+                .into_iter()
+                .partition(|warm| {
+                    Arc::strong_count(&warm.reader) > 1 || now.duration_since(warm.touched) < idle
+                });
+            readers.warm = kept;
+            closing
         };
-        let now = std::time::Instant::now();
-        let before = readers.warm.len();
-        readers.warm.retain(|warm| {
-            Arc::strong_count(&warm.reader) > 1 || now.duration_since(warm.touched) < idle
-        });
-        before - readers.warm.len()
+        let closed = closing.len();
+        drop(closing);
+        closed
+    }
+
+    /// Closes `readers` on a thread of their own, so the caller - the
+    /// window's thread, closing a project - does not wait on a phone's
+    /// hardware decoders stopping.
+    fn close_elsewhere(readers: Vec<Warm>) {
+        if readers.is_empty() {
+            return;
+        }
+        // A thread that will not start hands the readers back in the
+        // closure it drops, and they close here after all.
+        let _ = std::thread::Builder::new()
+            .name("close decoders".into())
+            .spawn(move || drop(readers));
     }
 
     /// Makes `frame` the still at `path`, a name no file has, until
@@ -1617,8 +1644,11 @@ impl ReaderPool {
             // filled the key; theirs wins.
             return Ok(reader);
         }
+        // The readers this one pushes out are closed after the lock is
+        // let go, not under it; see `close_idle`.
+        let mut pushed_out = Vec::new();
         while readers.warm.len() >= readers.max {
-            readers.warm.remove(0);
+            pushed_out.push(readers.warm.remove(0));
         }
         readers.warm.push(Warm {
             key,
@@ -1626,15 +1656,20 @@ impl ReaderPool {
             aim: target,
             touched: std::time::Instant::now(),
         });
+        drop(readers);
+        drop(pushed_out);
         Ok(opened)
     }
 
     /// Drops every warm reader, cached frame and adopted proxy - for when
     /// the media set changes wholesale, like closing a project.
     pub fn clear(&self) {
-        if let Ok(mut readers) = self.readers.lock() {
-            readers.warm.clear();
-        }
+        let closing = self
+            .readers
+            .lock()
+            .map(|mut readers| std::mem::take(&mut readers.warm))
+            .unwrap_or_default();
+        Self::close_elsewhere(closing);
         if let Ok(mut facts) = self.facts.lock() {
             facts.clear();
         }

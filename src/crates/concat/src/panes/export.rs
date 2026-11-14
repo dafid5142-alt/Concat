@@ -511,17 +511,6 @@ impl ExportPane {
         request.rate_den = den;
 
         studio.pause();
-        // The monitor's readers that sit idle are closed now rather than
-        // ten seconds on by the sweep: on a phone up to three of them hold
-        // MediaCodec decoder sessions, which the chip has few of and its
-        // encoder and the export's own decoders need. A reader comes back
-        // on the next frame the monitor asks of it; the cached frames stay.
-        let closed = concat_host::scheduler()
-            .pool()
-            .close_idle(std::time::Duration::ZERO);
-        if closed > 0 {
-            log::debug!("export: closed {closed} idle preview decoder(s) before starting");
-        }
         self.phase = ExportPhase::Running;
         self.progress = 0.0;
         self.stage = t("export.renderingVideo");
@@ -541,6 +530,22 @@ impl ExportPane {
         spawn(
             move || {
                 let job = job;
+                // The monitor's readers that sit idle are closed now rather
+                // than ten seconds on by the sweep: on a phone up to three
+                // of them hold MediaCodec decoder sessions, which the chip
+                // has few of and its encoder and the export's own decoders
+                // need. A reader comes back on the next frame the monitor
+                // asks of it; the cached frames stay. Here on the worker,
+                // before the first frame, and not on the window's thread:
+                // a phone's decoder can take seconds to stop, and the
+                // window waiting on it was "Concat isn't responding" the
+                // moment Export was pressed.
+                let closed = concat_host::scheduler()
+                    .pool()
+                    .close_idle(std::time::Duration::ZERO);
+                if closed > 0 {
+                    log::debug!("export: closed {closed} idle preview decoder(s) before starting");
+                }
                 export::run_on(&request, compositor, job.cancel_flag(), |progress| {
                     let fraction = if progress.total > 0 {
                         progress.frame as f32 / progress.total as f32
