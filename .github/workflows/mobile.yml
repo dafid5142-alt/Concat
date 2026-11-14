@@ -350,6 +350,8 @@ jobs:
 
   ios:
     name: iOS arm64
+    # Not when started by hand: a run for a phone under test builds Android alone.
+    if: github.event_name != 'workflow_dispatch'
     runs-on: macos-15
     timeout-minutes: 90
     steps:
@@ -458,6 +460,8 @@ jobs:
   # build's environment is written out in the build step below.
   ios-simulator:
     name: iOS simulator smoke
+    # Not when started by hand: a run for a phone under test builds Android alone.
+    if: github.event_name != 'workflow_dispatch'
     runs-on: macos-15
     timeout-minutes: 90
     steps:

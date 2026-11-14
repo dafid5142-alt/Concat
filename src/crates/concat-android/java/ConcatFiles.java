@@ -211,6 +211,38 @@ public class ConcatFiles extends Fragment {
     }
 
     /**
+     * Keeps the screen on while the activity's window shows: for the length
+     * of a job, so a phone left on the table does not sleep an export away.
+     * From any thread; the flag is set on the activity's own.
+     */
+    public static void keepScreenOn(final Activity activity) {
+        screenFlag(activity, true);
+    }
+
+    /** Lets the screen time out again, a job done. From any thread. */
+    public static void letScreenSleep(final Activity activity) {
+        screenFlag(activity, false);
+    }
+
+    private static void screenFlag(final Activity activity, final boolean on) {
+        activity.runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    int flag = android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON;
+                    if (on) {
+                        activity.getWindow().addFlags(flag);
+                    } else {
+                        activity.getWindow().clearFlags(flag);
+                    }
+                } catch (RuntimeException e) {
+                    Log.w(TAG, "could not keep the screen on: " + on, e);
+                }
+            }
+        });
+    }
+
+    /**
      * Opens a web address in the browser, or in whichever app claims it -
      * the launch screen's guides, the repository, the Discord invite. Null
      * when it went, or why it could not. Asked straight rather than through

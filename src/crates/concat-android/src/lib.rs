@@ -612,25 +612,46 @@ mod log_file {
 /// the activity applies on its own thread.
 #[cfg(target_os = "android")]
 mod awake {
+    use jni::{jni_sig, jni_str};
     use slint::android::AndroidApp;
-    use slint::android::android_activity::WindowManagerFlags;
 
+    /// Asked of the activity's window through the Java, on the activity's
+    /// own thread, and not through `AndroidApp::set_window_flags`. The
+    /// activity is kept behind a lock the window's thread holds for as
+    /// long as it is handling an event, and setting a flag there takes
+    /// that lock to write: asked from inside the tap on Export, the
+    /// window's thread waited on itself for ever, and every export on a
+    /// phone ended in "Concat isn't responding" before a frame was drawn.
+    /// A thread of our own asking it would only move the wait: the
+    /// window's thread reads the activity again inside the same event, and
+    /// a reader behind a waiting writer waits too.
     pub fn install(app: &AndroidApp) {
         let app = app.clone();
         concat::install_awake(Box::new(move |on| {
-            log::info!("display: asking for the screen kept on while a job runs: {on}");
-            if on {
-                app.set_window_flags(
-                    WindowManagerFlags::KEEP_SCREEN_ON,
-                    WindowManagerFlags::empty(),
-                );
-            } else {
-                app.set_window_flags(
-                    WindowManagerFlags::empty(),
-                    WindowManagerFlags::KEEP_SCREEN_ON,
-                );
+            let asked = super::java::with_class(&app, |env, activity, class| {
+                if on {
+                    env.call_static_method(
+                        class,
+                        jni_str!("keepScreenOn"),
+                        jni_sig!("(Landroid/app/Activity;)V"),
+                        &[activity.into()],
+                    )?;
+                } else {
+                    env.call_static_method(
+                        class,
+                        jni_str!("letScreenSleep"),
+                        jni_sig!("(Landroid/app/Activity;)V"),
+                        &[activity.into()],
+                    )?;
+                }
+                Ok(())
+            });
+            match asked {
+                Ok(()) => log::info!("display: the screen kept on while a job runs: {on}"),
+                Err(error) => log::warn!(
+                    "display: asking for the screen kept on ({on}) failed: {error}; the screen may sleep during a job"
+                ),
             }
-            log::info!("display: asked");
         }));
     }
 }
