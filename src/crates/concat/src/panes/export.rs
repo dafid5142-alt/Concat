@@ -456,6 +456,10 @@ impl ExportPane {
             self.message = t("export.nameNeedsToBeAFileName");
             return;
         };
+        // Each step from here to the worker says it was reached: a window
+        // that stops answering as Export is pressed leaves its last one
+        // in the log, which is the only word a phone gives of where.
+        log::info!("export: Export pressed");
         let output = format!(
             "{}/{name}.{}",
             self.folder.trim_end_matches('/'),
@@ -477,6 +481,7 @@ impl ExportPane {
                 return;
             }
         };
+        log::info!("export: the slot is claimed");
         let Some(session) = studio.session.as_ref() else {
             return;
         };
@@ -509,8 +514,13 @@ impl ExportPane {
         request.height = height;
         request.rate_num = num;
         request.rate_den = den;
+        log::info!(
+            "export: the request is made · {} clips",
+            request.clips.len()
+        );
 
         studio.pause();
+        log::info!("export: playback is paused");
         self.phase = ExportPhase::Running;
         self.progress = 0.0;
         self.stage = t("export.renderingVideo");
@@ -527,9 +537,18 @@ impl ExportPane {
         // None there or without a GPU, and the render then opens what it
         // can.
         let compositor = studio.host.monitor.off_thread();
+        log::info!(
+            "export: drawing on {}",
+            if compositor.is_some() {
+                "the window's device"
+            } else {
+                "a device of its own"
+            }
+        );
         spawn(
             move || {
                 let job = job;
+                log::info!("export: the worker has it");
                 // The monitor's readers that sit idle are closed now rather
                 // than ten seconds on by the sweep: on a phone up to three
                 // of them hold MediaCodec decoder sessions, which the chip
@@ -543,9 +562,7 @@ impl ExportPane {
                 let closed = concat_host::scheduler()
                     .pool()
                     .close_idle(std::time::Duration::ZERO);
-                if closed > 0 {
-                    log::debug!("export: closed {closed} idle preview decoder(s) before starting");
-                }
+                log::info!("export: closed {closed} idle preview decoder(s) before starting");
                 export::run_on(&request, compositor, job.cancel_flag(), |progress| {
                     let fraction = if progress.total > 0 {
                         progress.frame as f32 / progress.total as f32
@@ -566,6 +583,7 @@ impl ExportPane {
             },
             |studio, _, _, result| studio.handle(Msg::Export(ExportMsg::Finished(result))),
         );
+        log::info!("export: handed to its worker");
     }
 
     /// The sheet as Slint shows it.

@@ -450,9 +450,58 @@ public class ConcatFiles extends Fragment {
                 detail.append(" · its crash report could not be read: ").append(e);
             }
         }
+        if (exit.getReason() == ApplicationExitInfo.REASON_ANR) {
+            try {
+                InputStream trace = exit.getTraceInputStream();
+                if (trace != null) {
+                    detail.append(" · ").append(
+                            anrSummary(new String(readAll(trace), StandardCharsets.UTF_8)));
+                }
+            } catch (IOException | RuntimeException e) {
+                detail.append(" · its thread dump could not be read: ").append(e);
+            }
+        }
         byte[] mark = exit.getProcessStateSummary();
         String log = mark == null ? "" : new String(mark, StandardCharsets.UTF_8);
         return new String[] {log, died ? "died" : "ended", detail.toString()};
+    }
+
+    /**
+     * The threads of a hang's dump worth a log line: the window's own and
+     * the activity's, and a few more that were inside the app's library,
+     * the top of each one's stack - where the app was when it stopped
+     * answering.
+     */
+    private static String anrSummary(String dump) {
+        StringBuilder out = new StringBuilder("threads when it hung:");
+        String[] blocks = dump.split("\n\n");
+        int kept = 0;
+        for (int pass = 0; pass < 2 && kept < 6; pass++) {
+            for (String block : blocks) {
+                String trimmed = block.trim();
+                if (!trimmed.startsWith("\"")) {
+                    continue;
+                }
+                boolean lead = trimmed.startsWith("\"main\"")
+                        || trimmed.startsWith("\"android_main\"");
+                boolean wanted = pass == 0
+                        ? lead
+                        : !lead && trimmed.contains("libconcat_android.so");
+                if (!wanted) {
+                    continue;
+                }
+                String[] lines = trimmed.split("\n");
+                out.append(" || ");
+                for (int i = 0; i < lines.length && i < 20; i++) {
+                    out.append(lines[i].trim()).append(" | ");
+                }
+                kept++;
+                if (kept >= 6) {
+                    break;
+                }
+            }
+        }
+        return out.toString();
     }
 
     private static byte[] readAll(InputStream in) throws IOException {

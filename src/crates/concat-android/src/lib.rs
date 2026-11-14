@@ -618,7 +618,7 @@ mod awake {
     pub fn install(app: &AndroidApp) {
         let app = app.clone();
         concat::install_awake(Box::new(move |on| {
-            log::debug!("display: the screen kept on while a job runs: {on}");
+            log::info!("display: asking for the screen kept on while a job runs: {on}");
             if on {
                 app.set_window_flags(
                     WindowManagerFlags::KEEP_SCREEN_ON,
@@ -630,6 +630,7 @@ mod awake {
                     WindowManagerFlags::KEEP_SCREEN_ON,
                 );
             }
+            log::info!("display: asked");
         }));
     }
 }
