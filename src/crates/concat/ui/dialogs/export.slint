@@ -41,6 +41,7 @@ export struct ExportData {
     /// rung - "1080 × 1920" on a 9:16 edit - with its names, and which
     /// rungs cannot be picked: every one but the timeline's own
     resolutions: [string],
+    resolution-details: [string],
     rate: int,
     /// the rates offered, the timeline's own first, with its name under
     /// it; the export is at the timeline's rate unless another is picked
@@ -297,6 +298,7 @@ component DestinationSection inherits DialogSection {
 component OutputSection inherits DialogSection {
     in property <ExportData> data;
 
+    callback resolution-changed(index: int);
     callback rate-changed(index: int);
     callback bitrate-changed(mbps: float);
     callback codec-changed(index: int);
@@ -307,18 +309,14 @@ component OutputSection inherits DialogSection {
 
     DialogRow {
         label: I18n.t("export.resolution");
-        // The timeline's own size, which is the size it exports at: a
-        // 9:16 edit is 1080 × 1920. A fact, not a choice.
-        // https://github.com/jub0t/Concat/issues/109
-        HorizontalLayout {
-            alignment: end;
-            Text {
-                text: root.data.resolutions[root.data.resolution];
-                color: Theme.fg;
-                font-family: Theme.font-technical;
-                font-size: Theme.fs;
-                vertical-alignment: center;
-            }
+        // How fine the file comes out, along the timeline's own shape: a
+        // 9:16 edit is 1080 × 1920 at 1080p and 2160 × 3840 at 4K. The
+        // sheet opens on the timeline's own size.
+        Select {
+            current: root.data.resolution;
+            options: root.data.resolutions;
+            details: root.data.resolution-details;
+            changed(index) => { root.resolution-changed(index); }
         }
     }
 
@@ -602,6 +600,7 @@ export component ExportDialog inherits Rectangle {
     callback closed();
     callback name-edited(name: string);
     callback browse();
+    callback resolution-changed(index: int);
     callback rate-changed(index: int);
     callback codec-changed(index: int);
     callback ten-bit-changed(on: bool);
@@ -739,6 +738,7 @@ export component ExportDialog inherits Rectangle {
                         if !root.running: OutputSection {
                             data: root.data;
                             bitrate-changed(mbps) => { root.bitrate-changed(mbps); }
+                            resolution-changed(index) => { root.resolution-changed(index); }
                             rate-changed(index) => { root.rate-changed(index); }
                             codec-changed(index) => { root.codec-changed(index); }
                             ten-bit-changed(on) => { root.ten-bit-changed(on); }

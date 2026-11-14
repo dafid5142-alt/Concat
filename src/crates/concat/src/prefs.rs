@@ -362,7 +362,14 @@ impl Preferences {
     pub fn load(dirs: &AppDirs) -> Self {
         let path = dirs.config.join(FILE);
         let Ok(bytes) = std::fs::read(&path) else {
-            return Self::default();
+            // A phone that has kept no settings yet starts with proxies
+            // on: its chip writes a small copy of a clip in seconds, and
+            // playing the copy is what keeps the editor smooth there. The
+            // switch in Settings still turns them off, and is then kept.
+            return Self {
+                proxies: cfg!(target_os = "android"),
+                ..Self::default()
+            };
         };
         if let Ok(preferences) = serde_json::from_slice(&bytes) {
             return preferences;

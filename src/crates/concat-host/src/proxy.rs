@@ -26,7 +26,19 @@ use concat_media::{ColorRange, EncodeOptions, Encoder, FrameSink, Priority, Rate
 
 /// A file with more pixels than this gets a proxy: anything larger than
 /// full HD.
-const PIXELS_WITHOUT_PROXY: u64 = 1920 * 1080;
+///
+/// On a phone, anything larger than the proxy itself: a 1080p clip is
+/// already more than its screen shows of the monitor while it plays, and
+/// two of them playing at once is where the editor stopped being smooth.
+const PIXELS_WITHOUT_PROXY: u64 = if cfg!(target_os = "android") {
+    640 * 360
+} else {
+    1920 * 1080
+};
+/// A phone's proxy is this long on its long side whatever the original:
+/// 640 by 360 for a 16:9 clip. The paused monitor and the export read the
+/// original, so nothing of the picture that is kept is the proxy's.
+const PHONE_LONG_SIDE: u32 = 640;
 /// The proxy's long side is the original's divided by this, and never
 /// shorter than [`SHORTEST_LONG_SIDE`].
 const DIVISOR: u32 = 4;
@@ -43,7 +55,11 @@ pub fn wanted(width: u32, height: u32) -> bool {
 pub fn size_for(width: u32, height: u32) -> (u32, u32) {
     let (width, height) = (width.max(2), height.max(2));
     let long = width.max(height);
-    let target = (long / DIVISOR).max(SHORTEST_LONG_SIDE).min(long);
+    let target = if cfg!(target_os = "android") {
+        PHONE_LONG_SIDE.min(long)
+    } else {
+        (long / DIVISOR).max(SHORTEST_LONG_SIDE).min(long)
+    };
     let scale = f64::from(target) / f64::from(long);
     let side = |px: u32| (((f64::from(px) * scale).round() as u32) & !1).max(2);
     (side(width), side(height))

@@ -33,6 +33,9 @@ pub enum ExportMsg {
     /// The sheet is dismissed.
     Close,
     NameEdited(String),
+    /// A rung of the resolution ladder is picked: the file comes out that
+    /// fine, along the project's own aspect.
+    ResolutionChanged(i32),
     RateChanged(i32),
     CodecChanged(i32),
     TenBitChanged(bool),
@@ -134,14 +137,17 @@ impl ExportPane {
                 self.open = true;
                 self.phase = ExportPhase::Idle;
                 self.message.clear();
-                // The timeline's own size: the one rung that can be picked;
-                // and its own rate, first on the rate list.
+                // The timeline's own size until another is picked; and its
+                // own rate, first on the rate list.
                 self.resolution = Self::own_rung(studio);
                 self.rate = 0;
                 self.follow_canvas(studio);
             }
             ExportMsg::Close => self.open = false,
             ExportMsg::NameEdited(name) => self.name = name,
+            ExportMsg::ResolutionChanged(index) => {
+                self.resolution = (index.max(0) as usize).min(Self::ladder(studio).len() - 1);
+            }
             ExportMsg::RateChanged(index) => {
                 self.rate = (index.max(0) as usize).min(Self::rates(studio).len() - 1);
             }
@@ -347,12 +353,22 @@ impl ExportPane {
         let (width, height) = self.size(studio);
         let (num, den) = self.rate(studio);
         let fps = num as f32 / den.max(1) as f32;
-        let base = match width.min(height) {
-            0..=480 => 2_500.0,
-            481..=720 => 5_000.0,
-            721..=1080 => 8_000.0,
-            1081..=1440 => 16_000.0,
-            _ => 40_000.0,
+        // A phone's chip spends more bits than a desktop's encoder on the
+        // same picture, and at an upload's bitrate its file read softer
+        // than the same clip out of other phone editors: there the file
+        // is given what those give it, two and a half times as much at
+        // 1080p.
+        let base = match (width.min(height), cfg!(target_os = "android")) {
+            (0..=480, false) => 2_500.0,
+            (481..=720, false) => 5_000.0,
+            (721..=1080, false) => 8_000.0,
+            (1081..=1440, false) => 16_000.0,
+            (_, false) => 40_000.0,
+            (0..=480, true) => 5_000.0,
+            (481..=720, true) => 10_000.0,
+            (721..=1080, true) => 20_000.0,
+            (1081..=1440, true) => 32_000.0,
+            (_, true) => 60_000.0,
         };
         let motion = if fps > 30.5 { 1.5 } else { 1.0 };
         let deep = if self.deep(studio) { 1.25 } else { 1.0 };
@@ -499,7 +515,9 @@ impl ExportPane {
             color_range: ColorRange::Limited,
             hdr: self.hdr(studio),
         };
-        let (frame_w, frame_h) = studio.output_size();
+        // Titles are painted for the frame the file is written at, so a
+        // finer rung than the timeline's own keeps their edges sharp.
+        let (frame_w, frame_h) = self.size(studio);
         let titles = studio
             .host
             .titles
@@ -635,6 +653,19 @@ impl ExportPane {
                     })
                     .collect();
                 ModelRc::new(VecModel::from(sizes))
+            },
+            resolution_details: {
+                let names: Vec<SharedString> = Self::ladder(studio)
+                    .iter()
+                    .map(|rung| match rung {
+                        2160 => "4K".into(),
+                        1440 => "QHD".into(),
+                        1080 => "1080p".into(),
+                        720 => "720p".into(),
+                        _ => t("export.timelineSize").into(),
+                    })
+                    .collect();
+                ModelRc::new(VecModel::from(names))
             },
             rate: self.rate as i32,
             rates: {
