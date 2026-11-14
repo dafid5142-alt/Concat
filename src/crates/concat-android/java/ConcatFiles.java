@@ -90,8 +90,28 @@ public class ConcatFiles extends Fragment {
         if (folder == null) {
             return new String[] {null, "this phone has no media store to put it in"};
         }
-        return publish(activity, path, "video/mp4", folder,
+        return publish(activity, path, videoMime(new File(path).getName()), folder,
                 MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY));
+    }
+
+    /**
+     * The MIME type of a video file named {@code name}, by its container.
+     * The media store holds a file's name to its type: a ProRes export's
+     * "name.mov" or a WebM's "name.webm" filed as video/mp4 came out as
+     * "name.mov.mp4", which no player takes for what it is.
+     */
+    private static String videoMime(String name) {
+        String lower = name.toLowerCase(java.util.Locale.ROOT);
+        if (lower.endsWith(".webm")) {
+            return "video/webm";
+        }
+        if (lower.endsWith(".mov")) {
+            return "video/quicktime";
+        }
+        if (lower.endsWith(".mkv")) {
+            return "video/x-matroska";
+        }
+        return "video/mp4";
     }
 
     /**

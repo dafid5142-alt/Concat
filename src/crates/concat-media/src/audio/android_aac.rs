@@ -7,7 +7,7 @@
 //! FFmpeg's - and FFmpeg only muxes it.
 
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ffmpeg_the_third as ffmpeg;
 use ffmpeg_the_third::codec::encoder;
@@ -29,6 +29,17 @@ const CODEC_CONFIG: u32 = 2;
 const END_OF_STREAM: u32 = 4;
 /// How long a dequeue waits before the loop looks the other way.
 const WAIT: Duration = Duration::from_millis(10);
+/// How long the encoder may take no sound in and hand none back before the
+/// mix calls it stuck. It frees an input buffer within milliseconds of its
+/// output being read; ten seconds is a stall, and without this the export
+/// sat in "mixing audio" for ever on a phone whose encoder stopped, with
+/// nothing to do but close the app.
+const PATIENCE: Duration = Duration::from_secs(10);
+/// How long the encoder may hold its end of stream once it has been told
+/// the sound is over. Some phones' encoders hand back every packet and
+/// never the flag that says so; waited on for ever, that was the same
+/// export that never ended.
+const END_PATIENCE: Duration = Duration::from_secs(3);
 /// How many samples Android's encoder holds its sound back by, which its
 /// timestamps do not say: its packets are stamped from the first sample
 /// fed, as if the encoder had no delay, and a click fed at 1.000 s decodes
@@ -67,6 +78,12 @@ struct Aac {
     fed: u64,
     /// The encoder has handed back its end of stream.
     finished: bool,
+    /// The sample just past the last packet handed back, on the mix's own
+    /// clock: how far into the mix the encoded sound reaches.
+    reached: i64,
+    /// The end of stream never came and was no longer waited for; see
+    /// [`END_PATIENCE`].
+    gave_up: bool,
 }
 
 impl Aac {
@@ -76,11 +93,6 @@ impl Aac {
             path: destination.to_path_buf(),
             detail,
         };
-        let codec = ENCODERS
-            .iter()
-            .find_map(|name| MediaCodec::from_codec_name(name))
-            .or_else(|| MediaCodec::from_encoder_type("audio/mp4a-latm"))
-            .ok_or_else(|| fail("no AAC encoder on this phone".to_owned()))?;
         let mut format = MediaFormat::new();
         format.set_str("mime", "audio/mp4a-latm");
         format.set_i32("sample-rate", MIX_RATE as i32);
@@ -89,17 +101,49 @@ impl Aac {
         // AAC-LC, the profile every player decodes.
         format.set_i32("aac-profile", 2);
         format.set_i32("max-input-size", (FRAME * CHANNELS * 2 * 4) as i32);
-        codec
-            .configure(&format, None, MediaCodecDirection::Encoder)
-            .map_err(|error| fail(format!("configure: {error}")))?;
-        codec
-            .start()
-            .map_err(|error| fail(format!("start: {error}")))?;
-        Ok(Aac {
-            codec,
-            fed: 0,
-            finished: false,
-        })
+        // Each in turn, made only once the one before it would not start:
+        // a name the phone does not know can still come back as a codec,
+        // one that then refuses to be configured, and the mix used to end
+        // there with the phone's other encoders never asked.
+        let named = ENCODERS
+            .iter()
+            .map(|name| (*name, MediaCodec::from_codec_name(name)));
+        let any = std::iter::once_with(|| {
+            (
+                "the phone's own choice",
+                MediaCodec::from_encoder_type("audio/mp4a-latm"),
+            )
+        });
+        let mut refused: Vec<String> = Vec::new();
+        for (name, codec) in named.chain(any) {
+            let Some(codec) = codec else {
+                continue;
+            };
+            let started = codec
+                .configure(&format, None, MediaCodecDirection::Encoder)
+                .map_err(|error| format!("configure: {error}"))
+                .and_then(|()| codec.start().map_err(|error| format!("start: {error}")));
+            match started {
+                Ok(()) => {
+                    return Ok(Aac {
+                        codec,
+                        fed: 0,
+                        finished: false,
+                        reached: 0,
+                        gave_up: false,
+                    });
+                }
+                Err(why) => {
+                    log::warn!("android aac encoder: {name} would not start: {why}");
+                    refused.push(format!("{name}: {why}"));
+                }
+            }
+        }
+        Err(fail(if refused.is_empty() {
+            "no AAC encoder on this phone".to_owned()
+        } else {
+            refused.join("; ")
+        }))
     }
 
     /// Feeds `pcm`, interleaved 16-bit stereo, and hands every packet the
@@ -108,7 +152,10 @@ impl Aac {
     fn feed(&mut self, mut pcm: &[u8], last: bool, out: &mut Vec<Packet>) -> Result<()> {
         let frame_bytes = CHANNELS * 2;
         let mut ended = false;
+        // When the encoder last took sound in or handed a packet back.
+        let mut moved = Instant::now();
         while !pcm.is_empty() || (last && !ended) {
+            let mut took = false;
             if let DequeuedInputBufferResult::Buffer(mut buffer) = self
                 .codec
                 .dequeue_input_buffer(WAIT)
@@ -131,8 +178,18 @@ impl Aac {
                     .map_err(|error| self.fail(format!("queue: {error}")))?;
                 self.fed += (take / frame_bytes) as u64;
                 pcm = &pcm[take..];
+                took = take > 0 || ended;
             }
+            let held = out.len();
             self.drain(out, false)?;
+            if took || out.len() > held {
+                moved = Instant::now();
+            } else if moved.elapsed() >= PATIENCE {
+                return Err(self.fail(format!(
+                    "the encoder took no sound for {} seconds",
+                    PATIENCE.as_secs()
+                )));
+            }
         }
         if last {
             self.drain(out, true)?;
@@ -143,6 +200,8 @@ impl Aac {
     /// Takes the packets that are ready, or with `to_end` every one up to
     /// the encoder's end of stream.
     fn drain(&mut self, out: &mut Vec<Packet>, to_end: bool) -> Result<()> {
+        // When the encoder last handed anything back.
+        let mut heard = Instant::now();
         while !self.finished {
             match self
                 .codec
@@ -151,8 +210,12 @@ impl Aac {
             {
                 DequeuedOutputBufferInfoResult::Buffer(buffer) => {
                     let flags = buffer.info().flags();
-                    let pts =
-                        buffer.info().presentation_time_us() * i64::from(MIX_RATE) / 1_000_000;
+                    // To the nearest sample: the stamp is whole microseconds,
+                    // and cut short it put the frame fed at sample 1024 at
+                    // sample 1023.
+                    let pts = (buffer.info().presentation_time_us() * i64::from(MIX_RATE)
+                        + 500_000)
+                        .div_euclid(1_000_000);
                     // The buffer is the codec's whole allocation; the frame is
                     // the part the info names.
                     let offset = buffer.info().offset().max(0) as usize;
@@ -166,7 +229,9 @@ impl Aac {
                             data: frame.to_vec(),
                             pts: pts - DELAY,
                         });
+                        self.reached = self.reached.max(pts - DELAY + FRAME as i64);
                     }
+                    heard = Instant::now();
                     self.codec
                         .release_output_buffer(buffer, false)
                         .map_err(|error| self.fail(format!("release: {error}")))?;
@@ -175,6 +240,18 @@ impl Aac {
                     }
                 }
                 DequeuedOutputBufferInfoResult::TryAgainLater if !to_end => return Ok(()),
+                // Told the sound is over, it has handed back all it is
+                // going to; `mix` checks that was the whole of it.
+                DequeuedOutputBufferInfoResult::TryAgainLater
+                    if heard.elapsed() >= END_PATIENCE =>
+                {
+                    log::warn!(
+                        "android aac encoder: no end of stream {} seconds after the last packet; the mix ends at what it handed back",
+                        END_PATIENCE.as_secs()
+                    );
+                    self.gave_up = true;
+                    self.finished = true;
+                }
                 _ => {}
             }
         }
@@ -288,6 +365,19 @@ pub(super) fn mix(
     aac.feed(&tail, false, &mut packets)?;
     aac.feed(&[], true, &mut packets)?;
     write(&mut packets, &mut output)?;
+    // An encoder that never said it had ended is taken at its word only if
+    // what it handed back reaches the mix's end; short of it, the file
+    // would lose its last sound with nothing said.
+    if aac.gave_up && aac.reached + (FRAME as i64) <= samples {
+        return Err(Error::Ffi {
+            operation: "android aac encoder",
+            path: destination.to_path_buf(),
+            detail: format!(
+                "the encoder stopped {} samples short of the mix's end",
+                samples - aac.reached
+            ),
+        });
+    }
     output
         .write_trailer()
         .map_err(|error| ffi::fail("write trailer", destination, error))
